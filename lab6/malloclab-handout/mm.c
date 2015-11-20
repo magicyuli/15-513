@@ -13,6 +13,8 @@
 #include "mm.h"
 #include "memlib.h"
 
+typedef unsigned long long int_p;
+
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
 //#define DEBUG
@@ -49,7 +51,11 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+#define LOWHALFP(l) (!(l) ? 0 : heap_hd_p + ((int_p)(l) & (((int_p)1 << 32) - 1)))
+#define HIGHHALF(l) (((int_p)(l) >> 32) & (((int_p)1 << 32) - 1))
 #define PACK(size, alloc)  ((size) | (alloc))
+#define PACK64(high, low) (((int_p)(high) << 32) | (int_p)(low))
+
 #define PUT(p, v) (*(unsigned int *)(p) = (v))
 #define GET(p) (*(unsigned int *)(p))
 // #define GET_P(p) (*(char **)(p))
@@ -97,6 +103,7 @@ static inline char **get_seglist_p_by_sz(size_t sz);
 static inline void rm_from_freelist(void* p);
 static inline void add_to_freelist(void* p);
 static inline void mv_link(void *from, void *to);
+static inline char *new_seg_head(void *old_seg_head, void *p);
 
 /* global variables */
 static char *heap_hd_p = 0;
@@ -153,8 +160,11 @@ void *malloc (size_t size) {
     char **seg_p = MAX(get_seglist_p_by_sz(size), firstseg);
     dbg_printf("allocating block size %d to list %p\n", (int)size, seg_p);
     for (; seg_p < (char **)heap_hd_p && !curptr; seg_p++) {
+        if (HIGHHALF(*seg_p) < size) {
+            continue;
+        }
         dbg_printf("checking list %p\n", seg_p);
-        curptr = *seg_p;
+        curptr = LOWHALFP(*seg_p);
         while (curptr) {
             sz = (size_t) SIZE(curptr);
             if (sz >= size) {
@@ -366,7 +376,7 @@ void mm_checkheap(int lineno) {
     // walk through the free list
     int i;
     for (i = 0; i < SEGLISTNUM; i++) {
-        curptr = *(seglist + i);
+        curptr = LOWHALFP(*(seglist + i));
         while (curptr) {
             if (get_seglist_p(curptr) != seglist + i) {
                 printf("block %p size %d in wrong free list size %d. ",
@@ -430,7 +440,13 @@ static inline void rm_from_freelist(void *p) {
     char *next = NEXT_FR_P(p);
     // previous block is the head of the seg list
     if (prev < heap_hd_p) {
-        *((char **)prev) = next;
+        char **seg_hd = (char **)prev;
+        if (!next) {
+            *seg_hd = 0;
+        }
+        else {
+            *seg_hd = new_seg_head(*seg_hd, next);
+        }
     }
     // previous block is regular free block
     else {
@@ -445,9 +461,9 @@ static inline void rm_from_freelist(void *p) {
 static inline void add_to_freelist(void *p) {
     char **seg_hd = get_seglist_p(p);
     firstseg = !firstseg ? seg_hd : MIN(firstseg, seg_hd);
-    char *next = *seg_hd;
+    char *next = LOWHALFP(*seg_hd);
     // insert p as the first block of the seglist
-    *seg_hd = p;
+    *seg_hd = (char *)new_seg_head(*seg_hd, p);
     PUT_PREV_FR_P(p, seg_hd);
     // point p to the next block
     PUT_NEXT_FR_P(p, next);
@@ -466,11 +482,16 @@ static inline void mv_link(void *from, void *to) {
     /* head of the list */
     else {
         char **seg_hd = (char **)PREV_FR_P(from);
-        *seg_hd = to;
+        *seg_hd = new_seg_head(*seg_hd, to);
         PUT_PREV_FR_P(to, seg_hd);
     }
     PUT_NEXT_FR_P(to, NEXT_FR_P(from));
     if (NEXT_FR_P(from)) {
         PUT_PREV_FR_P(NEXT_FR_P(from), to);
     }
+}
+
+static inline char *new_seg_head(void *old_seg_head, void *p) {
+    long max_sz = MAX(HIGHHALF(old_seg_head), SIZE(p));
+    return (char *)PACK64(max_sz, (char *)p - heap_hd_p);
 }
