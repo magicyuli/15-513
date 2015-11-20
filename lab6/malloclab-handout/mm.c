@@ -15,7 +15,7 @@
 
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
-//#define DEBUG
+// #define DEBUG
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
 # define checkheap(...) mm_checkheap(__VA_ARGS__)
@@ -37,8 +37,10 @@
 #define ALIGNMENT 8
 #define WSIZE 4
 #define BLKSIZE 8
-#define MINSIZE 24
-#define HEAPEXTSIZE  (1<<10)  /* Extend heap by this amount (bytes) */  
+#define MINSIZE 16
+#define HEAPEXTSIZE  (BLKSIZE * 64)  /* Extend heap by this amount (bytes) */  
+#define SEGLISTNUM 12
+#define LOWER_BOUND_OF_SEGLIST 5
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
@@ -46,11 +48,11 @@
 /* helper macros */
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-#define PACK(size, alloc)  ((size) | (alloc)) 
+#define PACK(size, alloc)  ((size) | (alloc))
 #define PUT(p, v) (*(unsigned int *)(p) = (v))
 #define GET(p) (*(unsigned int *)(p))
-#define GET_P(p) (*(char **)(p))
-#define PUT_P(p, addr) (*(char **)(p) = (addr))
+#define GET_P(p) (*(int *)(p))
+#define PUT_P(p, addr) (*(int *)(p) = (addr))
 
 #define GET_SIZE(p) (GET(p) & ~0x7)
 #define HD_P(p) ((char *)(p) - WSIZE)
@@ -64,26 +66,34 @@
 #define IS_PRE_AL(p) (IS_AL(PREV_P(p)))
 #define IS_NEXT_AL(p) (IS_AL(NEXT_P(p)))
 
-#define NEXT_FR_P(p) (GET_P(p))
-#define PREV_FR_P(p) (GET_P((char *)(p) + BLKSIZE))
-#define PUT_NEXT_FR_P(p, addr) (*(char **)(p) = (addr))
-#define PUT_PREV_FR_P(p, addr) (*((char **)(p) + 1) = (addr))
+#define PTR_TO_OFFSET(p) ((int) (!(p) ? 0 : (char *)(p) - heap_hd_p))
+#define OFFSET_TO_PTR(off) ((off) ? (heap_hd_p + (off)) : NULL)
+
+#define NEXT_FR_P(p) (OFFSET_TO_PTR(GET_P(p)))
+#define PREV_FR_P(p) (OFFSET_TO_PTR(GET_P((char *)(p) + WSIZE)))
+#define PUT_NEXT_FR_P(p, addr) (PUT_P(p, PTR_TO_OFFSET(addr)))
+#define PUT_PREV_FR_P(p, addr) (PUT_P((char *)(p) + WSIZE, PTR_TO_OFFSET(addr)))
 
 #define PUT_HD(p, v) (PUT(HD_P(p), (v)))
 #define PUT_FT(p, v) (PUT(FT_P(p), (v)))
 
+
 /* helper functions */
 static void *extend_heap();
-static void insert_free_blk(void *p);
+//static void insert_free_blk(void *p);
 static int in_heap(const void *p);
 void mm_checkheap(int lineno);
+static inline char **get_seglist_p(void* p);
+static inline char **get_seglist_p_by_sz(size_t sz);
+static inline void rm_from_freelist(void* p);
+static inline void add_to_freelist(void* p);
 //static void set_blk_size(void* p, long heapsize);
 
 /* global variables */
 static char *heap_hd_p = 0;
 static long int heapsize = 0;
-static char *firstfree = 0;
 static char *firstblk;
+static char **seglist;
 
 /*
  * Initialize: return -1 on error, 0 on success.
@@ -91,20 +101,29 @@ static char *firstblk;
 int mm_init(void) {
     heap_hd_p = 0;
     heapsize = 0;
-    firstfree = 0;
     firstblk = NULL;
     mem_reset_brk();
-    //mem_deinit();
     /* Create the initial empty heap */
     if ((heap_hd_p = mem_sbrk(HEAPEXTSIZE)) == (void *) -1) 
         return -1;
-    PUT(heap_hd_p, 1);                          /* Alignment padding */
-    heapsize += HEAPEXTSIZE;
+    memset(heap_hd_p, 0, HEAPEXTSIZE);
+    seglist = (char **)heap_hd_p;
+    // padding. before this point is for seg list pointers
+    heap_hd_p += BLKSIZE * SEGLISTNUM;
+    // prologue
+    PUT(heap_hd_p, PACK(0, 1));
+    // head pointer to the data part
     char* real_p = heap_hd_p + BLKSIZE;
-    PUT_HD(real_p, PACK(heapsize - 8, 0));
-    PUT_FT(real_p, PACK(heapsize - 8, 0));
-    insert_free_blk(real_p);
+    // effective heap size
+    heapsize += HEAPEXTSIZE - BLKSIZE * SEGLISTNUM;
+    PUT_HD(real_p, PACK(heapsize - BLKSIZE, 0));
+    PUT_FT(real_p, PACK(heapsize - BLKSIZE, 0));
+    // epilogue
+    PUT_HD(NEXT_P(real_p), PACK(0, 1));
+    add_to_freelist(real_p);
     firstblk = real_p;
+    dbg_printf("data heap starts from %p\n", heap_hd_p);
+    dbg_printf("data blk starts from %p\n", firstblk);
     return 0;
 }
 
@@ -114,18 +133,27 @@ int mm_init(void) {
 void *malloc (size_t size) {
     dbg_printf("malloc %d\n", (int)size);
     dbg_printf("heapsize %d\n", (int)heapsize);
-    char* curptr = firstfree;
     // increment by 1 block to account for the head and footer
     size += BLKSIZE;
     size = MAX(ALIGN(size), MINSIZE);
-    size_t sz;
-    while (curptr) {
-        sz = (size_t) SIZE(curptr);
-        if (sz >= size) {
-            dbg_printf("found block size %d\n", (int)sz);
+    size_t sz = 0;
+    char* curptr = NULL;
+    char **seg_p = get_seglist_p_by_sz(size);
+    dbg_printf("allocating block size %d to list %p\n", (int)size, seg_p);
+    for (; seg_p < (char **)heap_hd_p; seg_p++) {
+        dbg_printf("checking list %p\n", seg_p);
+        curptr = *(seg_p);
+        while (curptr) {
+            sz = (size_t) SIZE(curptr);
+            if (sz >= size) {
+                dbg_printf("found block size %d\n", (int)sz);
+                break;
+            }
+            curptr = NEXT_FR_P(curptr);
+        }
+        if (curptr) {
             break;
         }
-        curptr = NEXT_FR_P(curptr);
     }
     if (!curptr) {
         if ((curptr = (char *)extend_heap(MAX(size, HEAPEXTSIZE))) == (char *)-1) {
@@ -136,40 +164,17 @@ void *malloc (size_t size) {
         dbg_printf("extended heap by %d\n", (int)sz);
     }
     if (sz >= size + MINSIZE) { /* need splitting */
-        
         // set up new free blk
         char *newptr = curptr + size;
         size_t newsize = sz - size;
         PUT_HD(newptr, PACK(newsize, 0));
         PUT_FT(newptr, PACK(newsize, 0));
-        // maintain the free list
-        if (PREV_FR_P(curptr)) { /* in the middle of the list */
-            PUT_NEXT_FR_P(PREV_FR_P(curptr), newptr);
-            PUT_PREV_FR_P(newptr, PREV_FR_P(curptr));
-        }
-        else { /* head of the list */    
-            firstfree = newptr;
-            PUT_PREV_FR_P(newptr, NULL);
-        }
-        PUT_NEXT_FR_P(newptr, NEXT_FR_P(curptr));
-        if (NEXT_FR_P(curptr)) {
-            PUT_PREV_FR_P(NEXT_FR_P(curptr), newptr);
-        }
+        rm_from_freelist(curptr);
+        add_to_freelist(newptr);
         sz = size;
     }
     else { /* don't need splitting */
-        if (PREV_FR_P(curptr)) { /* in the middle of the list */
-            PUT_NEXT_FR_P(PREV_FR_P(curptr), NEXT_FR_P(curptr));
-            if (NEXT_FR_P(curptr)) {
-                PUT_PREV_FR_P(NEXT_FR_P(curptr), PREV_FR_P(curptr));
-            }
-        }
-        else { /* head of the list */    
-            firstfree = NEXT_FR_P(curptr);
-            if (NEXT_FR_P(curptr)) {
-                PUT_PREV_FR_P(NEXT_FR_P(curptr), NULL);
-            }
-        }
+        rm_from_freelist(curptr);
     }
     // update the size and allocation status
     PUT_HD(curptr, PACK(sz, 1));
@@ -188,65 +193,45 @@ void free (void *p) {
     size_t size = SIZE(p);
     char *freeptr;
     size_t newsize;
-    char *prevp;
-    char *nextp;
+    char *prev;
+    char *next;
     // allo | free | allo
     if (IS_PRE_AL(p) && IS_NEXT_AL(p)) {
         dbg_printf("free case 1\n");
-        newsize = SIZE(p);
         freeptr = p;
-        // add the free blk to the free list
-        insert_free_blk(p);
+        newsize = SIZE(p);
     }
     // free | free | free
     else if (!IS_PRE_AL(p) && !IS_NEXT_AL(p)) {
         dbg_printf("free case 2\n");
-        prevp = PREV_P(p);
-        nextp = NEXT_P(p);
-        // remove next free from the list
-        if (PREV_FR_P(nextp)) {
-            PUT_NEXT_FR_P(PREV_FR_P(nextp), NEXT_FR_P(nextp));
-        }
-        else {
-            firstfree = NEXT_FR_P(nextp);
-        }
-        if (NEXT_FR_P(nextp)) {
-            PUT_PREV_FR_P(NEXT_FR_P(nextp), PREV_FR_P(nextp));
-        }
-        // concat the 3 parts
-        freeptr = prevp;
-        newsize = SIZE(prevp) + size + SIZE(nextp);
+        prev = PREV_P(p);
+        next = NEXT_P(p);
+        rm_from_freelist(prev);
+        rm_from_freelist(next);
+        freeptr = prev;
+        newsize = SIZE(prev) + size + SIZE(next);
     }
     // free | free | allo
     else if (!IS_PRE_AL(p)) {
         dbg_printf("free case 3\n");
-        prevp = PREV_P(p);
+        prev = PREV_P(p);
+        rm_from_freelist(prev);
         // concat the 2 parts
-        freeptr = prevp;
-        newsize = SIZE(prevp) + size;
+        freeptr = prev;
+        newsize = SIZE(prev) + size;
     }
     // allo | free | free
     else {
         dbg_printf("free case 4\n");
-        nextp = NEXT_P(p);
-        // move links from next to current
-        if (PREV_FR_P(nextp)) { /* next is in the middle of the list */
-            PUT_NEXT_FR_P(PREV_FR_P(nextp), p);
-            PUT_PREV_FR_P(p, PREV_FR_P(nextp));
-        }
-        else { /* next is the head of the list */
-            firstfree = p;
-            PUT_PREV_FR_P(p, NULL);
-        }
-        PUT_NEXT_FR_P(p, NEXT_FR_P(nextp));
-        if (NEXT_FR_P(nextp)) {
-            PUT_PREV_FR_P(NEXT_FR_P(nextp), p);
-        }
+        next = NEXT_P(p);
+        rm_from_freelist(next);
         freeptr = p;
-        newsize = size + SIZE(nextp);
+        newsize = size + SIZE(next);
     }
     PUT_HD(freeptr, PACK(newsize, 0));
     PUT_FT(freeptr, PACK(newsize, 0));
+    // add the free blk to the free list
+    add_to_freelist(freeptr);
     //dbg_printf("got here. %d\n", __LINE__);
     checkheap(__LINE__);
 }
@@ -335,19 +320,28 @@ void mm_checkheap(int lineno) {
         curptr = NEXT_P(curptr);
     }
     // walk through the free list
-    curptr = firstfree;
-    while (curptr) {
-        if (IS_AL(curptr)) {
-            printf("free blk not free. Called from %d line.\n", lineno);
-            exit(1);
+    int i;
+    for (i = 0; i < SEGLISTNUM; i++) {
+        curptr = *(seglist + i);
+        while (curptr) {
+            if (get_seglist_p(curptr) != seglist + i) {
+                printf("block %p size %d in wrong free list size %d. ",
+                    curptr, SIZE(curptr), 1 << (LOWER_BOUND_OF_SEGLIST + i));
+                printf("Called from %d line.\n", lineno);
+                exit(1);
+            }
+            if (IS_AL(curptr)) {
+                printf("free blk not free. Called from %d line.\n", lineno);
+                exit(1);
+            }
+            freecnt_2++;
+            printf("free list %p\n", curptr);
+            if (freecnt_2 > freecnt_1) {
+                printf("dead loop. Called from %d line.\n", lineno);
+                exit(1);
+            }
+            curptr = NEXT_FR_P(curptr);
         }
-        freecnt_2++;
-        printf("free list %p\n", curptr);
-        if (freecnt_2 > freecnt_1) {
-            printf("dead loop. Called from %d line.\n", lineno);
-            exit(1);
-        }
-        curptr = NEXT_FR_P(curptr);
     }
     if (freecnt_1 != freecnt_2) {
         printf("in-order: %li; list: %li\n", freecnt_1, freecnt_2);
@@ -361,18 +355,60 @@ static void *extend_heap(size_t size) {
     if ((p = mem_sbrk(size)) == (void*) -1) {
         return NULL;
     }
+    memset(p, 0, size);
     PUT_HD(p, PACK(size, 0));
     PUT_FT(p, PACK(size, 0));
+    // new epilogue block
     PUT_HD(NEXT_P(p), PACK(0, 1));
-    insert_free_blk(p);
+    //insert_free_blk(p);
     return p;
 }
 
-static void insert_free_blk(void* p) {
-    PUT_NEXT_FR_P(p, firstfree);
-    if (firstfree) {
-        PUT_PREV_FR_P(firstfree, p);
+static inline char **get_seglist_p(void* p) {
+    return get_seglist_p_by_sz(SIZE(p));
+}
+
+static inline char **get_seglist_p_by_sz(size_t sz) {
+    sz >>= LOWER_BOUND_OF_SEGLIST;
+    int idx = 0;
+    while (idx < SEGLISTNUM - 1 && sz > 0) {
+        idx++;
+        sz >>= 1;
     }
-    firstfree = p;
-    PUT_PREV_FR_P(p, NULL);
+    return seglist + idx;
+}
+
+static inline void rm_from_freelist(void* p) {
+    char *prev = PREV_FR_P(p);
+    // p is not in a seglist (newly created block)
+    if (!prev) {
+        return;
+    }
+    char *next = NEXT_FR_P(p);
+    // previous block is the head of the seg list
+    if (prev < heap_hd_p) {
+        *((char **)prev) = next;
+    }
+    // previous block is regular free block
+    else {
+        PUT_NEXT_FR_P(prev, next);
+    }
+    // point the previous pointer of the next block to the previous block
+    if (next) {
+        PUT_PREV_FR_P(next, prev);
+    }
+}
+
+static inline void add_to_freelist(void* p) {
+    char **seg_hd = get_seglist_p(p);
+    char *next = *seg_hd;
+    // insert p as the first block of the seglist
+    *seg_hd = p;
+    PUT_PREV_FR_P(p, seg_hd);
+    // point p to the next block
+    PUT_NEXT_FR_P(p, next);
+    if (next) {
+        PUT_PREV_FR_P(next, p);
+    }
+    dbg_printf("added %p size %d to list %p\n", p, SIZE(p), seg_hd);
 }
