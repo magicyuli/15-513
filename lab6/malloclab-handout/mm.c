@@ -1,8 +1,23 @@
-/*
+/**
  * mm.c
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * 
+ * The implementation is based on segregated list.
+ * 
+ * The heads of the seg lists are stored at the beginning of the heap.
+ * 
+ * There are 12 seg lists. The size lower bound for list i is 
+ * 2^(5 + i) bytes.
+ * 
+ * Each list head is augmented with the max size in that list. So,
+ * when searching for free blocks, it can skip the list where the max
+ * size is smaller than the target size.
+ * 
+ * Malloc searches the lists and use the first fit. Free does coalescing
+ * and put the block into the seg list based on the size.
+ * 
+ * Name: Liruoyang Yu
+ * AndrewId: liruoyay
+ * 
  */
 #include <assert.h>
 #include <stdio.h>
@@ -15,8 +30,6 @@
 
 typedef unsigned long long int_p;
 
-/* If you want debugging output, use the following macro.  When you hand
- * in, remove the #define DEBUG line. */
 //#define DEBUG
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
@@ -26,6 +39,7 @@ typedef unsigned long long int_p;
 # define checkheap(...)
 #endif
 
+/* for running the test program */
 /* do not change the following! */
 #ifdef DRIVER
 /* create aliases for driver tests */
@@ -39,108 +53,157 @@ typedef unsigned long long int_p;
 #define ALIGNMENT 8
 #define WSIZE 4
 #define BLKSIZE 8
+/* min block size */
 #define MINSIZE 16
-#define HEAPEXTSIZE  (BLKSIZE * 64)  /* Extend heap by this amount (bytes) */  
+/* Extend heap by this amount (bytes) */
+#define HEAPEXTSIZE  (BLKSIZE * 64)
+/* number of seg lists */
 #define SEGLISTNUM 12
+/* blocks smaller that 2^5 bytes are in the first seg list */
 #define LOWER_BOUND_OF_SEGLIST 5
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
-/* helper macros */
+/**********************
+ * start helper macros 
+ **********************/
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define LOWHALFP(l) (!(l) ? 0 : heap_hd_p + ((int_p)(l) & (((int_p)1 << 32) - 1)))
+/* get the pointer packed in the low 32 bits of l */
+#define LOWHALFP(l) (!(l) ? 0 : \
+            heap_hd_p + ((int_p)(l) & (((int_p)1 << 32) - 1)))
+/* get the value packed in the high 32 bits of l */
 #define HIGHHALF(l) (((int_p)(l) >> 32) & (((int_p)1 << 32) - 1))
+/* pack two values into one */
 #define PACK(size, alloc)  ((size) | (alloc))
+/* pack two values into a 64-bit number */
 #define PACK64(high, low) (((int_p)(high) << 32) | (int_p)(low))
 
+/* put the value as unsigned int at position p */
 #define PUT(p, v) (*(unsigned int *)(p) = (v))
+/* get the value stored at position p as unsigned int */
 #define GET(p) (*(unsigned int *)(p))
-// #define GET_P(p) (*(char **)(p))
-// #define PUT_P(p, addr) (*(char **)(p) = (addr))
-#define GET_P(p) (*(int *)(p))
-#define PUT_P(p, addr) (*(int *)(p) = (addr))
+/* put the value as signed int at position p */
+#define PUT_I(p, v) (*(int *)(p) = (v))
+/* get the value stored at position p as signed int */
+#define GET_I(p) (*(int *)(p))
 
+/* get the size packed at p */
 #define GET_SIZE(p) (GET(p) & ~0x7)
+/* get the header pointer given block pointer */
 #define HD_P(p) ((char *)(p) - WSIZE)
+/* get the size of block pointed by p */
 #define SIZE(p) (GET(HD_P(p)) & ~0x7)
+/* get the footer pointer given block pointer */
 #define FT_P(p) ((char *)(p) + SIZE(p) - BLKSIZE)
+/* get the footer pointer of the previous block given block pointer */
 #define PREV_FT_P(p) ((char *)(p) - BLKSIZE)
+/* get the pointer of the next block given block pointer */
 #define NEXT_P(p) ((char *)(p) + SIZE(p))
+/* get the pointer of the previous block given block pointer */
 #define PREV_P(p) ((char *)(p) - GET_SIZE(PREV_FT_P(p)))
 
+/* if the block is allocated */
 #define IS_AL(p) (GET(HD_P(p)) & 0x1)
+/* if the previous block is allocated */
 #define IS_PRE_AL(p) (IS_AL(PREV_P(p)))
+/* if the next block is allocated */
 #define IS_NEXT_AL(p) (IS_AL(NEXT_P(p)))
 
+/* convert offset to pointer */
 #define PTR_TO_OFFSET(p) ((int) (!(p) ? 0 : (char *)(p) - heap_hd_p))
+/* convert pointer to offset */
 #define OFFSET_TO_PTR(off) ((off) ? (heap_hd_p + (off)) : NULL)
 
-// #define NEXT_FR_P(p) (GET_P(p))
-// #define PREV_FR_P(p) (GET_P((char *)(p) + BLKSIZE))
-// #define PUT_NEXT_FR_P(p, addr) (*(char **)(p) = (addr))
-// #define PUT_PREV_FR_P(p, addr) (*((char **)(p) + 1) = (char *)(addr))
-#define NEXT_FR_P(p) (OFFSET_TO_PTR(GET_P(p)))
-#define PREV_FR_P(p) (OFFSET_TO_PTR(GET_P((char *)(p) + WSIZE)))
-#define PUT_NEXT_FR_P(p, addr) (PUT_P(p, PTR_TO_OFFSET(addr)))
-#define PUT_PREV_FR_P(p, addr) (PUT_P((char *)(p) + WSIZE, PTR_TO_OFFSET(addr)))
+/* get the next free block in the seg list */
+#define NEXT_FR_P(p) (OFFSET_TO_PTR(GET_I(p)))
+/* get the previous free block in the seg list */
+#define PREV_FR_P(p) (OFFSET_TO_PTR(GET_I((char *)(p) + WSIZE)))
+/* set the next free block in the seg list */
+#define PUT_NEXT_FR_P(p, ad) (PUT_I(p, PTR_TO_OFFSET(ad)))
+/* set the previous free block in the seg list */
+#define PUT_PREV_FR_P(p, ad) (PUT_I((char *)(p) + WSIZE, PTR_TO_OFFSET(ad)))
 
+/* set the header value */
 #define PUT_HD(p, v) (PUT(HD_P(p), (v)))
+/* set the footer value */
 #define PUT_FT(p, v) (PUT(FT_P(p), (v)))
 
+/* if the two blocks with size s1 and s2 in the same seg list */
 #define SAME_LIST(s1, s2) (((s1) ^ (s2)) <= (s1) && ((s1) ^ (s2)) <= (s2))
+/**********************
+ * end helper macros 
+ **********************/
 
-
-/* helper functions */
-static inline void *extend_heap();
-//static void insert_free_blk(void *p);
-static inline int in_heap(const void *p);
+/*************************
+ * begin helper functions 
+ *************************/
 void mm_checkheap(int lineno);
+static inline void *extend_heap();
+static inline int in_heap(const void *p);
 static inline char **get_seglist_p(void* p);
 static inline char **get_seglist_p_by_sz(size_t sz);
 static inline void rm_from_freelist(void* p);
 static inline void add_to_freelist(void* p);
 static inline void mv_link(void *from, void *to);
 static inline char *new_seg_head(void *old_seg_head, void *p);
+/*************************
+ * end helper functions 
+ *************************/
 
-/* global variables */
+/*************************
+ * begin global variables 
+ *************************/
+/* pointer to the start of the data area of the heap */
 static char *heap_hd_p = 0;
 static long int heapsize = 0;
+/* pointer to the first data block */
 static char *firstblk;
+/* seg list head array */
 static char **seglist;
+/* first seg list that has elements */
 static char **firstseg = 0;
+/*************************
+ * end global variables 
+ *************************/
 
 /*
  * Initialize: return -1 on error, 0 on success.
  */
 int mm_init(void) {
+    /* reset heap and globals */
     heap_hd_p = 0;
     heapsize = 0;
     firstblk = NULL;
     firstseg = 0;
     mem_reset_brk();
+    
     /* Create the initial empty heap */
     if ((heap_hd_p = mem_sbrk(HEAPEXTSIZE)) == (void *) -1) 
         return -1;
     memset(heap_hd_p, 0, HEAPEXTSIZE);
+    
+    /* init seg list */
     seglist = (char **)heap_hd_p;
-    // padding. before this point is for seg list pointers
+    
+    /* area before heap_hd_p is for seg list pointers */
     heap_hd_p += BLKSIZE * SEGLISTNUM;
-    // prologue
+    
+    /* prologue block */
     PUT(heap_hd_p, PACK(0, 1));
-    // head pointer to the data part
-    char* real_p = heap_hd_p + BLKSIZE;
-    // effective heap size
+    /* head pointer to the data part */
+    firstblk = heap_hd_p + BLKSIZE;
+    /* effective heap size */
     heapsize += HEAPEXTSIZE - BLKSIZE * SEGLISTNUM;
-    PUT_HD(real_p, PACK(heapsize - BLKSIZE, 0));
-    PUT_FT(real_p, PACK(heapsize - BLKSIZE, 0));
-    // epilogue
-    PUT_HD(NEXT_P(real_p), PACK(0, 1));
-    add_to_freelist(real_p);
+    /* init the first free block */
+    PUT_HD(firstblk, PACK(heapsize - BLKSIZE, 0));
+    PUT_FT(firstblk, PACK(heapsize - BLKSIZE, 0));
+    /* epilogue block */
+    PUT_HD(NEXT_P(firstblk), PACK(0, 1));
+    add_to_freelist(firstblk);
 
-    firstblk = real_p;
     dbg_printf("data heap starts from %p\n", heap_hd_p);
     dbg_printf("data blk starts from %p\n", firstblk);
     return 0;
@@ -152,18 +215,25 @@ int mm_init(void) {
 void *malloc (size_t size) {
     dbg_printf("malloc %d\n", (int)size);
     dbg_printf("heapsize %d\n", (int)heapsize);
-    // increment by 1 block to account for the head and footer
+    /* increment by 1 block to account for the head and footer */
     size += BLKSIZE;
+    /* align the size */
     size = MAX(ALIGN(size), MINSIZE);
+    /* size of fit block */
     size_t sz = 0;
     char *curptr = NULL;
+    /* seg list to start searching with */
     char **seg_p = MAX(get_seglist_p_by_sz(size), firstseg);
+
     dbg_printf("allocating block size %d to list %p\n", (int)size, seg_p);
+
     for (; seg_p < (char **)heap_hd_p && !curptr; seg_p++) {
+        /* max size in the list smaller than the target size */
         if (HIGHHALF(*seg_p) < size) {
             continue;
         }
         dbg_printf("checking list %p\n", seg_p);
+        /* first element in this seg list */
         curptr = LOWHALFP(*seg_p);
         while (curptr) {
             sz = (size_t) SIZE(curptr);
@@ -174,33 +244,40 @@ void *malloc (size_t size) {
             curptr = NEXT_FR_P(curptr);
         }
     }
+    /* haven't found fit block, extend the heap */
     if (!curptr) {
-        if ((curptr = (char *)extend_heap(MAX(size, HEAPEXTSIZE))) == (char *)-1) {
+        if ((curptr = (char *)extend_heap(MAX(size, HEAPEXTSIZE)))
+            == (char *) -1) {
             return NULL;
         }
         sz = SIZE(curptr);
         heapsize += sz;
         dbg_printf("extended heap by %d\n", (int)sz);
     }
-    if (sz >= size + MINSIZE) { /* need splitting */
-        // set up new free blk
+    /* need splitting */
+    if (sz >= size + MINSIZE) {
+        /* set up new free blk */
         char *newptr = curptr + size;
         size_t newsize = sz - size;
         PUT_HD(newptr, PACK(newsize, 0));
         PUT_FT(newptr, PACK(newsize, 0));
+        /* the split free block is in the same seg list */
         if (SAME_LIST(sz, newsize)) {
+            /* just move the links */
             mv_link(curptr, newptr);
         }
         else {
+            /* move the block to another list */
             rm_from_freelist(curptr);
             add_to_freelist(newptr);
         }
         sz = size;
     }
-    else { /* don't need splitting */
+    /* don't need splitting */
+    else {
         rm_from_freelist(curptr);
     }
-    // update the size and allocation status
+    /* update the size and allocation status */
     PUT_HD(curptr, PACK(sz, 1));
     PUT_FT(curptr, PACK(sz, 1));
     checkheap(__LINE__);
@@ -215,59 +292,73 @@ void free (void *p) {
     dbg_printf("free %p\n", p);
     if(!p || !in_heap(p)) return;
     size_t size = SIZE(p);
+    /* pointer to the resulting coalesced free block */
     char *freeptr;
+    /* size of the resulting coalesced free block */
     size_t newsize;
+    /* contiguous blocks */
     char *prev;
     char *next;
-    // allo | free | allo
+    
+    /***********************
+     * start coalesce 
+     ***********************/
+    /* allo | free | allo */
     if (IS_PRE_AL(p) && IS_NEXT_AL(p)) {
         dbg_printf("free case 1\n");
         freeptr = p;
         newsize = SIZE(p);
-        // add the free blk to the free list
+        /* just add the free blk to the free list */
         PUT_HD(freeptr, PACK(newsize, 0));
         PUT_FT(freeptr, PACK(newsize, 0));
         add_to_freelist(freeptr);
     }
-    // free | free | free
+    /* free | free | free */
     else if (!IS_PRE_AL(p) && !IS_NEXT_AL(p)) {
         dbg_printf("free case 2\n");
         prev = PREV_P(p);
         next = NEXT_P(p);
         freeptr = prev;
         size_t prevsz = SIZE(prev);
+        /* concat the 3 parts */
         newsize = prevsz + size + SIZE(next);
         PUT_HD(freeptr, PACK(newsize, 0));
         PUT_FT(freeptr, PACK(newsize, 0));
+        
+        /* new block in the same seg list as previous block */
         if (SAME_LIST(prevsz, newsize)) {
             rm_from_freelist(next);
         }
+        /* new block in the same seg list as next block */
         else if (SAME_LIST(SIZE(next), newsize)) {
             rm_from_freelist(prev);
             mv_link(next, prev);
         }
+        /* new block in a different block */
         else {
             rm_from_freelist(prev);
             rm_from_freelist(next);
             add_to_freelist(freeptr);
         }
     }
-    // free | free | allo
+    /* free | free | allo */
     else if (!IS_PRE_AL(p)) {
         dbg_printf("free case 3\n");
         prev = PREV_P(p);
-        // concat the 2 parts
+        /* concat the 2 parts */
         freeptr = prev;
         size_t prevsz = SIZE(prev);
         newsize = prevsz + size;
         PUT_HD(freeptr, PACK(newsize, 0));
         PUT_FT(freeptr, PACK(newsize, 0));
+        
+        /* new block in the same seg list as the previous block */
         if (!SAME_LIST(prevsz, newsize)) {
             rm_from_freelist(prev);
             add_to_freelist(freeptr);
         }
     }
-    // allo | free | free
+    /* allo | free | free */
     else {
         dbg_printf("free case 4\n");
         next = NEXT_P(p);
@@ -275,62 +366,62 @@ void free (void *p) {
         newsize = size + SIZE(next);
         PUT_HD(freeptr, PACK(newsize, 0));
         PUT_FT(freeptr, PACK(newsize, 0));
+        
+        /* new block in the same seg list as the next block */
         if (!SAME_LIST(SIZE(next), newsize)) {
             rm_from_freelist(next);
             add_to_freelist(freeptr);
         }
+        /* same list, just move links */
         else {
             mv_link(next, freeptr);
         }
     }
-    // PUT_HD(freeptr, PACK(newsize, 0));
-    // PUT_FT(freeptr, PACK(newsize, 0));
-    
-    //dbg_printf("got here. %d\n", __LINE__);
+    /***********************
+     * end coalesce 
+     ***********************/
     checkheap(__LINE__);
 }
 
 /*
- * realloc - you may want to look at mm-naive.c
+ * realloc
  */
 void *realloc(void *oldptr, size_t size) {
     dbg_printf("realloc %p %d\n", oldptr, (int)size);
     size_t oldsize;
     void *newptr;
 
-    /* If size == 0 then this is just free, and we return NULL. */
+    /* if size == 0 then this is just free */
     if(size == 0) {
         free(oldptr);
         return 0;
     }
 
-    /* If oldptr is NULL, then this is just malloc. */
+    /* if oldptr is NULL, then this is just malloc */
     if(oldptr == NULL) {
         return malloc(size);
     }
 
     newptr = malloc(size);
 
-    /* If realloc() fails the original block is left untouched  */
+    /* if realloc fails the original block is left untouched */
     if(!newptr) {
         return 0;
     }
 
-    /* Copy the old data. */
+    /* copy the old data */
     oldsize = SIZE(oldptr);
     if(size < oldsize) oldsize = size;
     memcpy(newptr, oldptr, oldsize);
 
-    /* Free the old block. */
+    /* free the old block. */
     free(oldptr);
 
     return newptr;
 }
 
 /*
- * calloc - you may want to look at mm-naive.c
- * This function is not tested by mdriver, but it is
- * needed to run the traces.
+ * calloc - malloc with all bytes set to 0.
  */
 void *calloc(size_t nmemb, size_t size) {
     size_t bytes = nmemb * size;
@@ -341,69 +432,67 @@ void *calloc(size_t nmemb, size_t size) {
     return p;
 }
 
-
 /*
- * Return whether the pointer is in the heap.
- * May be useful for debugging.
+ * check whether the pointer is in the heap.
  */
 static inline int in_heap(const void *p) {
     return p <= mem_heap_hi() && p >= mem_heap_lo();
 }
 
 /*
- * Return whether the pointer is aligned.
- * May be useful for debugging.
- */
-//static int aligned(const void *p) {
-    //return (size_t)ALIGN(p) == (size_t)p;
-//}
-
-/*
- * mm_checkheap
+ * heap consistency check routine for debugging
  */
 void mm_checkheap(int lineno) {
     char* curptr = firstblk;
     long freecnt_1 = 0;
     long freecnt_2 = 0;
-    // walk through the heap
+    
+    /* walk through the heap */
     while (curptr && in_heap(curptr) && SIZE(curptr) > 0) {
         if (!IS_AL(curptr)) {
             freecnt_1++;
-            //printf("%p\n", curptr);
         }
         curptr = NEXT_P(curptr);
     }
-    // walk through the free list
+    
+    /* walk through the free list */
     int i;
     for (i = 0; i < SEGLISTNUM; i++) {
         curptr = LOWHALFP(*(seglist + i));
         while (curptr) {
+            /* free block in the wrong seg list */
             if (get_seglist_p(curptr) != seglist + i) {
                 printf("block %p size %d in wrong free list size %d. ",
                     curptr, SIZE(curptr), 1 << (LOWER_BOUND_OF_SEGLIST + i));
-                printf("Called from %d line.\n", lineno);
+                printf("Line %d.\n", lineno);
                 exit(1);
             }
+            /* allocated block in the seg list */
             if (IS_AL(curptr)) {
-                printf("free blk not free. Called from %d line.\n", lineno);
+                printf("free blk not free. Line %d.\n", lineno);
                 exit(1);
             }
             freecnt_2++;
             printf("free list %p, size %d\n", curptr, SIZE(curptr));
+            /* potential loop happened in the linked list */
             if (freecnt_2 > freecnt_1) {
-                printf("dead loop. Called from %d line.\n", lineno);
+                printf("inf loop. Line %d.\n", lineno);
                 exit(1);
             }
             curptr = NEXT_FR_P(curptr);
         }
     }
+    /* counts are not consistent */
     if (freecnt_1 != freecnt_2) {
-        printf("in-order: %li; list: %li\n", freecnt_1, freecnt_2);
-        printf("different counts of free blocks. Called from %d line.\n", lineno);
+        printf("in-order count: %li; list count: %li\n", freecnt_1, freecnt_2);
+        printf("different counts of free blks. Line %d.\n", lineno);
         exit(1);
     }
 }
 
+/*
+ * extend the heap
+ */
 static inline void *extend_heap(size_t size) {
     void* p;
     if ((p = mem_sbrk(size)) == (void *) -1) {
@@ -417,10 +506,16 @@ static inline void *extend_heap(size_t size) {
     return p;
 }
 
+/*
+ * get the head of the seg list p belongs to
+ */
 static inline char **get_seglist_p(void *p) {
     return get_seglist_p_by_sz(SIZE(p));
 }
 
+/*
+ * get the head of the seg list the block with size sz belongs to
+ */
 static inline char **get_seglist_p_by_sz(size_t sz) {
     sz >>= LOWER_BOUND_OF_SEGLIST;
     int idx = 0;
@@ -431,6 +526,9 @@ static inline char **get_seglist_p_by_sz(size_t sz) {
     return seglist + idx;
 }
 
+/*
+ * remove p from the seg list
+ */
 static inline void rm_from_freelist(void *p) {
     char *prev = PREV_FR_P(p);
     // p is not in a seglist (newly created block)
@@ -458,6 +556,9 @@ static inline void rm_from_freelist(void *p) {
     }
 }
 
+/*
+ * add p to the seg list
+ */
 static inline void add_to_freelist(void *p) {
     char **seg_hd = get_seglist_p(p);
     firstseg = !firstseg ? seg_hd : MIN(firstseg, seg_hd);
@@ -473,6 +574,9 @@ static inline void add_to_freelist(void *p) {
     dbg_printf("added %p size %d to list %p\n", p, SIZE(p), seg_hd);
 }
 
+/*
+ * move the links on "from" to "to"
+ */
 static inline void mv_link(void *from, void *to) {
     /* in the middle of the list */
     if (PREV_FR_P(from) > heap_hd_p) {
@@ -491,6 +595,10 @@ static inline void mv_link(void *from, void *to) {
     }
 }
 
+/*
+ * compute the head of the seg list given the original max size and the 
+ * block to be added at the head
+ */
 static inline char *new_seg_head(void *old_seg_head, void *p) {
     long max_sz = MAX(HIGHHALF(old_seg_head), SIZE(p));
     return (char *)PACK64(max_sz, (char *)p - heap_hd_p);
