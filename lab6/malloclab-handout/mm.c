@@ -51,14 +51,16 @@ typedef unsigned long long int_p;
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
+/* word size */
 #define WSIZE 4
 #define BLKSIZE 8
 /* min block size */
 #define MINSIZE 16
 /* number of seg lists */
 #define SEGLISTNUM 12
-/* Extend heap by this amount (bytes) */
+/* initial heap size (bytes) */
 #define HEAPINITSIZE  (BLKSIZE * 64)
+/* extend heap by this amount (bytes) */
 #define HEAPEXTSIZE  (BLKSIZE * 64)
 /* blocks smaller that 2^5 bytes are in the first seg list */
 #define LOWER_BOUND_OF_SEGLIST 5
