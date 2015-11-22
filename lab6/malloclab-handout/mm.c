@@ -185,7 +185,8 @@ int mm_init(void) {
     /* Create the initial empty heap */
     if ((heap_hd_p = mem_sbrk(HEAPINITSIZE)) == (void *) -1) 
         return -1;
-    memset(heap_hd_p, 0, HEAPINITSIZE);
+    /* init seg lists */
+    memset(heap_hd_p, 0, BLKSIZE * SEGLISTNUM);
     
     /* init seg list */
     seglist = (char **)heap_hd_p;
@@ -204,6 +205,10 @@ int mm_init(void) {
     PUT_FT(firstblk, PACK(heapsize - BLKSIZE, 0));
     /* epilogue block */
     PUT_HD(NEXT_P(firstblk), PACK(0, 1));
+
+    /* init first free blk */
+    PUT_NEXT_FR_P(firstblk, NULL);
+    PUT_PREV_FR_P(firstblk, NULL);
     add_to_freelist(firstblk);
 
     dbg_printf("data heap starts from %p\n", heap_hd_p);
@@ -572,11 +577,13 @@ static inline void *extend_heap(size_t size) {
     if ((p = mem_sbrk(size)) == (void *) -1) {
         return NULL;
     }
-    memset(p, 0, size);
+    /* init new block */
     PUT_HD(p, PACK(size, 0));
     PUT_FT(p, PACK(size, 0));
-    // new epilogue block
+    /* new epilogue block */
     PUT_HD(NEXT_P(p), PACK(0, 1));
+    PUT_NEXT_FR_P(p, NULL);
+    PUT_PREV_FR_P(p, NULL);
     return p;
 }
 
