@@ -59,7 +59,7 @@ typedef unsigned long long int_p;
 /* number of seg lists */
 #define SEGLISTNUM 12
 /* initial heap size (bytes) */
-#define HEAPINITSIZE  (BLKSIZE * 64)
+#define HEAPINITSIZE  (BLKSIZE * 128)
 /* extend heap by this amount (bytes) */
 #define HEAPEXTSIZE  (BLKSIZE * 64)
 /* blocks smaller that 2^5 bytes are in the first seg list */
@@ -480,7 +480,7 @@ static inline int in_heap(const void *p) {
  * includes header footer and is aligned
  */
 static inline size_t compute_size(size_t size) {
-    /* increment by 1 block to account for the head and footer */
+    /* increment by 1 block to account for the header and footer */
     size += BLKSIZE;
     /* align the size */
     size = MAX(ALIGN(size), MINSIZE);
