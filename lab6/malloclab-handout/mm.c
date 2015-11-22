@@ -153,7 +153,7 @@ static inline char **get_seglist_p_by_sz(size_t sz);
 static inline void rm_from_freelist(void* p);
 static inline void add_to_freelist(void* p);
 static inline void mv_link(void *from, void *to);
-static inline char *new_seg_head(void *old_seg_head, void *p);
+static inline char *new_seg_head(size_t sz, void *p);
 /*************************
  * end helper functions 
  *************************/
@@ -476,7 +476,7 @@ static inline int in_heap(const void *p) {
 }
 
 /*
- * convert arbitrary size to the size that 
+ * Convert arbitrary size to the size that 
  * includes header footer and is aligned
  */
 static inline size_t compute_size(size_t size) {
@@ -570,7 +570,7 @@ void mm_checkheap(int lineno) {
 }
 
 /*
- * extend the heap
+ * Extend the heap
  */
 static inline void *extend_heap(size_t size) {
     void* p;
@@ -588,14 +588,14 @@ static inline void *extend_heap(size_t size) {
 }
 
 /*
- * get the head of the seg list p belongs to
+ * Get the head of the seg list p belongs to
  */
 static inline char **get_seglist_p(void *p) {
     return get_seglist_p_by_sz(SIZE(p));
 }
 
 /*
- * get the head of the seg list the block with size sz belongs to
+ * Get the head of the seg list the block with size sz belongs to
  */
 static inline char **get_seglist_p_by_sz(size_t sz) {
     sz >>= LOWER_BOUND_OF_SEGLIST;
@@ -608,7 +608,7 @@ static inline char **get_seglist_p_by_sz(size_t sz) {
 }
 
 /*
- * remove p from the seg list
+ * Remove p from the seg list
  */
 static inline void rm_from_freelist(void *p) {
     char *prev = PREV_FR_P(p);
@@ -624,7 +624,7 @@ static inline void rm_from_freelist(void *p) {
             *seg_hd = 0;
         }
         else {
-            *seg_hd = new_seg_head(*seg_hd, next);
+            *seg_hd = new_seg_head(HIGHHALF(*seg_hd), next);
         }
     }
     // previous block is regular free block
@@ -638,16 +638,43 @@ static inline void rm_from_freelist(void *p) {
 }
 
 /*
- * add p to the seg list
+ * Add p to the seg list. 
+ * Try maintaining the ascending order of the list,
+ * by ensuring each block size is no more than 8 bigger than its next.
  */
 static inline void add_to_freelist(void *p) {
     char **seg_hd = get_seglist_p(p);
-    char *next = LOWHALFP(*seg_hd);
-    // insert p as the first block of the seglist
-    *seg_hd = (char *)new_seg_head(*seg_hd, p);
-    PUT_PREV_FR_P(p, seg_hd);
+    char *first = LOWHALFP(*seg_hd);
+    char *next = first;
+    char *prev = (char *)seg_hd;
+    
+    /* take care of the max size and first block */
+    size_t psz = SIZE(p);
+    /* empty seglist */
+    if (!first) {
+        *seg_hd = (char *)new_seg_head(psz, p);
+    }
+    /* p is the smallest */
+    else if (psz <= SIZE(first) + BLKSIZE) {
+        *seg_hd = (char *)new_seg_head(HIGHHALF(*seg_hd), p);
+    }
+    /* p is not the smallest */
+    else {
+        if (psz > HIGHHALF(*seg_hd)) {
+            *seg_hd = (char *)new_seg_head(psz, first);
+        }
+        while (next && psz > SIZE(next) + BLKSIZE) {
+            prev = next;
+            next = NEXT_FR_P(next);
+        }
+    }
     // point p to the next block
     PUT_NEXT_FR_P(p, next);
+    PUT_PREV_FR_P(p, prev);
+    if ((char **)prev != seg_hd) {
+        PUT_NEXT_FR_P(prev, p);
+        PUT_PREV_FR_P(p, prev);
+    }
     if (next) {
         PUT_PREV_FR_P(next, p);
     }
@@ -655,7 +682,7 @@ static inline void add_to_freelist(void *p) {
 }
 
 /*
- * move the links on "from" to "to"
+ * Move the links on "from" to "to"
  */
 static inline void mv_link(void *from, void *to) {
     /* in the middle of the list */
@@ -670,7 +697,8 @@ static inline void mv_link(void *from, void *to) {
     /* head of the list */
     else {
         char **seg_hd = (char **)fromprev;
-        *seg_hd = new_seg_head(*seg_hd, to);
+        size_t maxsz = MAX(HIGHHALF(*seg_hd), SIZE(to));
+        *seg_hd = new_seg_head(maxsz, to);
         PUT_PREV_FR_P(to, seg_hd);
     }
     PUT_NEXT_FR_P(to, fromnext);
@@ -680,10 +708,9 @@ static inline void mv_link(void *from, void *to) {
 }
 
 /*
- * compute the head of the seg list given the original max size and the 
+ * Compute the head of the seg list given the original max size and the 
  * block to be added at the head
  */
-static inline char *new_seg_head(void *old_seg_head, void *p) {
-    long max_sz = MAX(HIGHHALF(old_seg_head), SIZE(p));
-    return (char *)PACK64(max_sz, (char *)p - heap_hd_p);
+static inline char *new_seg_head(size_t sz, void *p) {
+    return (char *)PACK64(sz, (char *)p - heap_hd_p);
 }
