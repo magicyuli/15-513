@@ -13,7 +13,15 @@
  * size is smaller than the target size.
  * 
  * Malloc searches the lists and use the first fit. Free does coalescing
- * and put the block into the seg list based on the size.
+ * and put the block into the seg list based on the size. A approximate
+ * ascending order of the lists are maintained.
+ * 
+ * Each data block is preceeded by a 4-byte header and followed by a 4-byte
+ * footer, which recording the size and the allocation status of the block 
+ * to facilitate the lookup. These two pieces of information are packed 
+ * into a int. As the blocks are all 8-byte aligned, so the low 3 bits of
+ * the size are always 0. Thus, we can use the last bit as the allocation
+ * status bit.
  * 
  * Name: Liruoyang Yu
  * AndrewId: liruoyay
@@ -708,7 +716,7 @@ static inline void mv_link(void *from, void *to) {
 }
 
 /*
- * Compute the head of the seg list given the original max size and the 
+ * Compute the head of the seg list given the max size and the 
  * block to be added at the head
  */
 static inline char *new_seg_head(size_t sz, void *p) {
