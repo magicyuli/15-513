@@ -1,3 +1,10 @@
+/**
+ * Header file for cache.c.
+ * 
+ * 
+ * Liruoyang YU
+ * liruoyay
+ */
 #include <semaphore.h>
 #include <string.h>
 #include <stdio.h>
